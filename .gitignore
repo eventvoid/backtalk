@@ -1,0 +1,24 @@
+# Secrets — never commit
+.env
+
+# Local tooling / editors / OS
+.claude/
+.vscode/
+.idea/
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Logs
+*.log
+
+# Generated dataset & model weights — regenerate locally (see README)
+data/*
+!data/.gitkeep
+checkpoints/*
+!checkpoints/.gitkeep

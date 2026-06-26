@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>backtalk</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --line:#e4e7ec; --ink:#1b2330; --muted:#828a97;
+          --accent:#2f6feb;
+          --in-bg:#eaf1ff; --in-ln:#bcd2ff; --in-ink:#1d4ed8;
+          --out-bg:#eafaf0; --out-ln:#bce6cd; --out-ink:#15803d;
+          --end-bg:#fdf0e3; --end-ln:#f3d3ac; --end-ink:#b45309; }
+  * { box-sizing:border-box; }
+  html,body { height:100%; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width:600px; margin:0 auto; padding:16px; min-height:100%;
+          display:flex; flex-direction:column; gap:10px; }
+  .brand { font-size:14px; font-weight:700; letter-spacing:-.01em; color:var(--ink); }
+
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px; }
+  .params { display:grid; grid-template-columns:repeat(3,1fr); gap:8px 10px; }
+  .field label { display:block; font-size:10px; text-transform:uppercase; letter-spacing:.04em;
+                 color:var(--muted); margin-bottom:3px; }
+  select, input[type=number] { width:100%; padding:6px 8px; font-size:13px; color:var(--ink);
+          border:1px solid var(--line); border-radius:7px; background:#fff; }
+  select:focus, input:focus { outline:none; border-color:var(--accent); }
+  details.adv { margin-top:10px; border-top:1px solid var(--line); padding-top:8px; }
+  details.adv > summary { cursor:pointer; font-size:11px; color:var(--muted); user-select:none;
+          list-style:none; display:flex; align-items:center; gap:5px; }
+  details.adv > summary::before { content:"▸"; font-size:9px; transition:transform .15s; }
+  details.adv[open] > summary::before { transform:rotate(90deg); }
+  .adv-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:8px 10px; margin-top:8px; }
+
+  .actions { display:flex; gap:8px; }
+  button { padding:9px 12px; font-size:14px; font-weight:600; border:0; border-radius:8px; cursor:pointer; }
+  #go { flex:1; color:#fff; background:var(--accent); }
+  #go:hover { background:#2a62cf; }
+  #rand { background:#eceef3; color:var(--ink); }
+  button:disabled { opacity:.55; cursor:default; }
+
+  .metrics { display:grid; grid-template-columns:repeat(5,1fr); gap:8px; }
+  .metric { background:var(--card); border:1px solid var(--line); border-radius:8px;
+            padding:7px 6px; text-align:center; }
+  .metric .v { font-size:14px; font-weight:600; font-variant-numeric:tabular-nums; }
+  .metric .k { font-size:9px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin-top:1px; }
+
+  .metrics[hidden] { display:none; }
+  .metrics.live .metric { border-color:#c9dbff; }
+  .result { flex:1; min-height:130px; background:var(--card); border:1px solid var(--line);
+            border-radius:10px; padding:16px 18px; font-size:15.5px; line-height:1.7;
+            white-space:pre-wrap; word-break:break-word; overflow:auto; }
+  .result.placeholder { color:var(--muted); display:flex; align-items:center; justify-content:center; font-size:13px; }
+  .result.done { background:var(--out-bg); border-color:var(--out-ln); }
+  /* live = the model's actual (reversed) token stream, natural generation order */
+  .result.live { font:13px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; color:#566; }
+  .result.live::after, .result.car::after { content:"▋"; color:var(--accent);
+            animation:blink 1s steps(2) infinite; margin-left:1px; }
+  @keyframes blink { 50% { opacity:0; } }
+  .err { color:#b00020; }
+
+  .gd > summary { cursor:pointer; font-size:12px; font-weight:600; color:var(--ink); user-select:none;
+          list-style:none; display:flex; align-items:center; gap:6px; }
+  .gd > summary::before { content:"▸"; font-size:10px; color:var(--muted); transition:transform .15s; }
+  .gd[open] > summary::before { transform:rotate(90deg); }
+  .gd-head { display:flex; align-items:center; justify-content:space-between; margin:10px 0 8px; }
+  .toggle { display:inline-flex; border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+  .toggle .tg { padding:4px 13px; font-size:11px; font-weight:600; background:#fff; color:var(--muted); border:0; cursor:pointer; }
+  .toggle .tg.active { background:var(--accent); color:#fff; }
+  .copybtn { padding:4px 11px; font-size:11px; font-weight:600; background:#eceef3; color:var(--ink); border-radius:7px; cursor:pointer; }
+  .tech { border:1px solid var(--line); border-radius:8px; overflow:hidden; max-height:260px; overflow-y:auto; }
+  .seg { display:block; padding:8px 11px; }
+  .seg + .seg { border-top:1px solid var(--line); }
+  .seglab { display:block; font-size:9px; text-transform:uppercase; letter-spacing:.06em; font-weight:700; opacity:.7; margin-bottom:4px; }
+  .segtext { display:block; font:12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; white-space:pre-wrap; word-break:break-word; }
+  .seg.in { background:var(--in-bg); color:#13327a; }
+  .seg.out { background:var(--out-bg); color:#0f5c2e; }
+  .seg.end { background:var(--end-bg); color:var(--end-ink); }
+  .seg.end .segtext { font-weight:700; }
+  .gd-params { font:11px/1.5 ui-monospace, Menlo, monospace; color:var(--muted); margin-top:8px;
+               display:flex; flex-wrap:wrap; gap:4px 12px; }
+  .gd-params b { color:var(--ink); font-weight:600; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="brand">backtalk</div>
+
+  <div class="card">
+    <div class="params" id="params"></div>
+    <details class="adv">
+      <summary>Advanced</summary>
+      <div class="adv-grid">
+        <div class="field"><label>temperature</label><input type="number" id="temperature" value="0.8" step="0.05" min="0.05" max="2"></div>
+        <div class="field"><label>top_k</label><input type="number" id="top_k" value="40" step="1" min="1" max="256"></div>
+        <div class="field"><label>max tokens</label><input type="number" id="max_new_tokens" value="600" step="10" min="16" max="1000"></div>
+        <div class="field"><label>seed</label><input type="number" id="seed" placeholder="random" step="1"></div>
+      </div>
+    </details>
+  </div>
+
+  <div class="actions">
+    <button id="go">Generate</button>
+    <button id="rand" title="Random combination">🎲 Random</button>
+  </div>
+
+  <div class="metrics" id="metrics" hidden></div>
+
+  <div class="result placeholder" id="result">Press Generate to create a story.</div>
+
+  <details class="card gd" id="gd" hidden>
+    <summary>Generation data</summary>
+    <div class="gd-head">
+      <div class="toggle" id="toggle">
+        <button class="tg active" data-mode="reversed">Reversed</button>
+        <button class="tg" data-mode="readable">Readable</button>
+      </div>
+      <button id="copyTech" class="copybtn">Copy</button>
+    </div>
+    <div class="tech">
+      <div class="seg in"><span class="seglab">prompt → model</span><span class="segtext" id="seg_in"></span></div>
+      <div class="seg out"><span class="seglab">model output</span><span class="segtext" id="seg_out"></span></div>
+      <div class="seg end"><span class="seglab">end marker</span><span class="segtext" id="seg_end">&lt;|end|&gt;</span></div>
+    </div>
+    <div class="gd-params" id="gd_params"></div>
+  </details>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const FIELDS = ["hero","setting","problem","helper_or_item","lesson"];
+const DEFAULTS = {hero:"dog", setting:"snowy field", problem:"big storm",
+                  helper_or_item:"little boat", lesson:"sharing"};
+let ALLOWED = {};
+const GD = { mode:"reversed", techIn:"", techOut:"", readIn:"", readOut:"" };
+
+fetch("/options").then(r => r.json()).then(o => {
+  ALLOWED = o.allowed;
+  const box = $("params");
+  for (const f of FIELDS) {
+    const wrap = document.createElement("div"); wrap.className = "field";
+    const lab = document.createElement("label"); lab.textContent = f; wrap.appendChild(lab);
+    const sel = document.createElement("select"); sel.id = f;
+    for (const v of ALLOWED[f]) {
+      const opt = document.createElement("option"); opt.value = v; opt.textContent = v;
+      if (v === DEFAULTS[f]) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    wrap.appendChild(sel); box.appendChild(wrap);
+  }
+});
+
+function randomCombo() {
+  for (const f of FIELDS) {
+    const opts = ALLOWED[f]; $(f).value = opts[Math.floor(Math.random() * opts.length)];
+  }
+}
+
+function renderGD() {
+  const readable = GD.mode === "readable";
+  $("seg_in").textContent = readable ? GD.readIn : GD.techIn;
+  $("seg_out").textContent = readable ? GD.readOut : GD.techOut;
+}
+function setMode(mode) {
+  GD.mode = mode;
+  for (const b of $("toggle").children) b.classList.toggle("active", b.dataset.mode === mode);
+  renderGD();
+}
+
+// ---- live metrics ----
+let metricTimer = null;
+function metricsShell() {
+  const cell = (id, k, v) => `<div class="metric"><div class="v" id="${id}">${v}</div><div class="k">${k}</div></div>`;
+  $("metrics").innerHTML =
+    cell("m_latency", "latency", "—") + cell("m_total", "total", "0.0 s") +
+    cell("m_speed", "speed", "—") + cell("m_tokens", "tokens", "0") + cell("m_seed", "seed", "—");
+  $("metrics").className = "metrics live"; $("metrics").hidden = false;
+}
+const setM = (id, v) => { const e = $(id); if (e) e.textContent = v; };
+
+// Forward typewriter so the readable story reveals naturally (left to right).
+let typeTimer = null;
+function typeOut(el, text) {
+  cancelAnimationFrame(typeTimer);
+  el.textContent = ""; el.classList.add("car");
+  const step = Math.max(2, Math.ceil(text.length / 80));
+  let i = 0;
+  (function tick() {
+    i = Math.min(text.length, i + step);
+    el.textContent = text.slice(0, i);
+    if (i < text.length) { typeTimer = requestAnimationFrame(tick); }
+    else el.classList.remove("car");
+  })();
+}
+
+async function generate() {
+  const body = { temperature:parseFloat($("temperature").value),
+                 top_k:parseInt($("top_k").value),
+                 max_new_tokens:parseInt($("max_new_tokens").value),
+                 seed: $("seed").value.trim() === "" ? null : parseInt($("seed").value) };
+  FIELDS.forEach(f => body[f] = $(f).value);
+
+  const go = $("go"), rand = $("rand"), result = $("result");
+  go.disabled = rand.disabled = true;
+  cancelAnimationFrame(typeTimer); clearInterval(metricTimer);
+  $("gd").hidden = true;
+  result.className = "result live"; result.textContent = "";
+
+  let params = null, inputText = "", reversedPrompt = "", revBuf = "";
+  let tokens = 0, latencyMs = null;
+  const t0 = performance.now();
+  metricsShell();                                  // metrics appear at the start...
+  metricTimer = setInterval(() => {                // ...and tick in real time
+    const el = (performance.now() - t0) / 1000;
+    setM("m_total", el.toFixed(1) + " s");
+    if (tokens > 0) setM("m_speed", (tokens / el).toFixed(1) + "/s");
+  }, 100);
+
+  try {
+    const res = await fetch("/generate", { method:"POST",
+      headers:{ "Content-Type":"application/json" }, body:JSON.stringify(body) });
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({error:res.statusText}));
+      clearInterval(metricTimer); $("metrics").hidden = true;
+      result.className = "result"; result.innerHTML = `<span class="err">${e.error}</span>`;
+      return;
+    }
+    const reader = res.body.getReader(), dec = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream:true });
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
+        if (!line.trim()) continue;
+        const msg = JSON.parse(line);
+        if (msg.event === "start") {
+          params = msg.params; inputText = msg.input_text; reversedPrompt = msg.reversed_prompt;
+          setM("m_seed", params.seed);
+        } else if (msg.event === "chunk") {
+          // live: show the model's actual token stream (reversed, natural order)
+          revBuf += msg.delta;
+          result.textContent = revBuf;
+          result.scrollTop = result.scrollHeight;
+          if (msg.n != null) {
+            tokens = msg.n; setM("m_tokens", tokens);
+            if (latencyMs === null) { latencyMs = performance.now() - t0; setM("m_latency", Math.round(latencyMs) + " ms"); }
+          }
+        } else if (msg.event === "done") {
+          clearInterval(metricTimer);
+          const m = msg.metrics;
+          setM("m_latency", m.latency_ms + " ms"); setM("m_total", (m.total_ms / 1000).toFixed(1) + " s");
+          setM("m_speed", m.throughput + "/s"); setM("m_tokens", m.tokens); setM("m_seed", params.seed);
+          $("metrics").className = "metrics";
+          result.className = "result done";
+          typeOut(result, msg.story);          // resolve into the readable story
+          GD.techIn = reversedPrompt; GD.techOut = msg.reversed_story;
+          GD.readIn = inputText; GD.readOut = msg.story;
+          setMode("reversed");
+          $("gd_params").innerHTML =
+            `<span>seed <b>${params.seed}</b></span><span>temp <b>${params.temperature}</b></span>` +
+            `<span>top_k <b>${params.top_k}</b></span><span>max_tokens <b>${params.max_new_tokens}</b></span>`;
+          $("gd").hidden = false;
+        }
+      }
+    }
+  } catch (e) {
+    clearInterval(metricTimer); $("metrics").hidden = true;
+    result.className = "result"; result.innerHTML = `<span class="err">request failed: ${e}</span>`;
+  } finally {
+    clearInterval(metricTimer);
+    go.disabled = rand.disabled = false;
+  }
+}
+
+$("go").addEventListener("click", generate);
+$("rand").addEventListener("click", randomCombo);
+$("toggle").addEventListener("click", e => { const b = e.target.closest(".tg"); if (b) setMode(b.dataset.mode); });
+$("copyTech").addEventListener("click", () => {
+  const text = $("seg_in").textContent + "\n" + $("seg_out").textContent + "\n<|end|>";
+  if (navigator.clipboard) navigator.clipboard.writeText(text);
+  const btn = $("copyTech"); btn.textContent = "Copied"; setTimeout(() => btn.textContent = "Copy", 1200);
+});
+</script>
+</body>
+</html>
