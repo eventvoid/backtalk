@@ -1,5 +1,6 @@
 # Secrets — never commit
 .env
+.node.env
 server.env
 
 # Local tooling / editors / OS
