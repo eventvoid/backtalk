@@ -66,11 +66,9 @@ tokenizers/backtalk-tokenizer/tokenizer.json
 Checkpoints are intentionally excluded from Git. Their long-term object-storage
 distribution strategy is not fixed yet; existing local files continue to work.
 
-For an optional node container on a machine that already has the checkpoints:
-
-```bash
-make up-node
-```
+The model node intentionally runs outside the public Docker Compose project.
+Run it natively so the machine can use its actual accelerator runtime (MPS or
+CUDA); the public Coolify server never receives checkpoints.
 
 ## Models
 

@@ -56,23 +56,5 @@ services:
       - "8080"
     restart: unless-stopped
 
-  node:
-    profiles: ["local-node"]
-    build:
-      context: .
-      dockerfile: backend-node/Dockerfile
-    environment:
-      GATEWAY_URL: http://gateway:8080
-      NODE_TOKEN: ${NODE_TOKEN:-}
-      NODE_NAME: node-1
-      NODE_TRANSPORT: pull
-      DEVICE: cpu
-      NODE_MAX_CONCURRENCY: ${NODE_MAX_CONCURRENCY:-1}
-      NODE_POLL_WAIT_MS: ${NODE_POLL_WAIT_MS:-30000}
-      NODE_EVENT_BATCH_MS: ${NODE_EVENT_BATCH_MS:-100}
-    depends_on:
-      - gateway
-    restart: unless-stopped
-
 volumes:
   pgdata:

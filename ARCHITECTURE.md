@@ -69,14 +69,10 @@ NODE_TRANSPORT=pull \
 python3 backend-node/worker.py
 ```
 
-The optional Compose node is isolated behind the `local-node` profile:
-
-```bash
-make up-node
-```
-
-That profile currently expects runtime checkpoints to exist locally. Checkpoint
-distribution through object storage will be designed separately.
+The node is deliberately not part of Docker Compose. It runs natively on the
+compute machine so MPS or CUDA is available and reads checkpoints from that
+machine's local filesystem. Checkpoint distribution through object storage will
+be designed separately.
 
 ## Repository boundaries
 
