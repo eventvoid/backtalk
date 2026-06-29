@@ -125,7 +125,13 @@ def _post(path, body, timeout=30):
     data = json.dumps(body).encode()
     req = urllib.request.Request(
         f"{CONFIG['gateway_url']}{path}", data=data, method="POST",
-        headers={"content-type": "application/json", "x-node-token": CONFIG["node_token"]},
+        headers={
+            "content-type": "application/json",
+            "x-node-token": CONFIG["node_token"],
+            # Cloudflare can reject Python urllib's default User-Agent before
+            # the request reaches the gateway.
+            "user-agent": "BackTalk-Node/1.0",
+        },
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode())
