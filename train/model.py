@@ -1,23 +1,25 @@
-"""Minimal GPT (nanoGPT-style) for byte-level reversed-story modeling.
+"""Minimal GPT (nanoGPT-style) for reversed-text language modeling.
 
-Kept intentionally small and MPS-friendly: uses F.scaled_dot_product_attention
-(supported on Metal), float32, no fused/compiled paths.
+Kept intentionally small and portable: uses scaled dot-product attention with
+no mandatory fused or compiled execution path.
 """
 from dataclasses import dataclass, asdict
 
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+from torch.utils.checkpoint import checkpoint
 
 
 @dataclass
 class GPTConfig:
-    vocab_size: int = 257      # 256 byte values + EOS (256)
-    block_size: int = 640      # covers the full dataset (max prompt+EOS = 585 bytes)
-    n_layer: int = 6
-    n_head: int = 6
-    n_embd: int = 384
+    vocab_size: int = 32768
+    block_size: int = 2048
+    n_layer: int = 8
+    n_head: int = 8
+    n_embd: int = 512
     dropout: float = 0.1
+    gradient_checkpointing: bool = False
 
 
 class Block(nn.Module):
@@ -86,7 +88,10 @@ class GPT(nn.Module):
         pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
         x = self.drop(self.tok_emb(idx) + self.pos_emb(pos))
         for block in self.blocks:
-            x = block(x)
+            if self.config.gradient_checkpointing and self.training:
+                x = checkpoint(block, x, use_reentrant=False)
+            else:
+                x = block(x)
         x = self.ln_f(x)
         logits = self.lm_head(x)
         loss = None

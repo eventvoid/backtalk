@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>backtalk · Ask</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div class="wrap">
+  <div class="head">
+    <div class="brand">backtalk</div>
+    <div class="toggle">
+      <a class="tg active" href="/">Ask</a>
+      <a class="tg" href="/stories">Stories</a>
+      <a class="tg" href="/docs">Docs</a>
+    </div>
+  </div>
+  <div class="subhead"><div class="tagline">Ask one question, get one answer.</div></div>
+
+  <!-- answer area grows; the input sits at the bottom -->
+  <div class="feed">
+    <div class="answer placeholder" id="out">Your answer will appear here.</div>
+    <div class="fbbar" id="fbSingle" hidden>
+      <span>Was this answer good?</span>
+      <button class="ghost" data-choice="yes">Yes</button>
+      <button class="ghost" data-choice="no">No</button>
+    </div>
+    <div id="ab" hidden>
+      <div class="ab">
+        <div><div class="ablabel">Answer A</div><div class="answer pending" id="ansA">Waiting for generation…</div></div>
+        <div><div class="ablabel">Answer B</div><div class="answer pending" id="ansB">Waiting for generation…</div></div>
+      </div>
+      <div class="fbbar" id="fbAB" style="margin-top:10px" hidden>
+        <span>Which answer is better?</span>
+        <button class="ghost" data-choice="A">Answer A</button>
+        <button class="ghost" data-choice="B">Answer B</button>
+        <button class="ghost" data-choice="none">None</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="hint" id="hint"></div>
+  <div class="composer">
+    <textarea id="q" maxlength="4000" placeholder="Ask a question in English…" rows="1"></textarea>
+    <button id="send" class="primary">Ask</button>
+  </div>
+  <div class="foot">backtalk gateway · <a href="/docs">API docs</a></div>
+</div>
+
+<script src="/app.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+let busy = false, currentRequest = null;
+
+function resetUI() { $("ab").hidden = true; $("fbSingle").hidden = true; $("out").hidden = false; }
+function showError(msg) { resetUI(); const o = $("out"); o.className = "answer err"; o.textContent = msg; }
+function offerSingle(id) {
+  currentRequest = id;
+  const bar = $("fbSingle");
+  bar.querySelectorAll("button").forEach((b) => (b.disabled = false));
+  bar.querySelector("span").textContent = "Was this answer good?"; bar.querySelector("span").className = "";
+  bar.hidden = false;
+}
+function prepareAB(id) {
+  $("out").hidden = true; $("fbSingle").hidden = true;
+  for (const variant of ["A", "B"]) {
+    const el = $("ans" + variant);
+    el.className = "answer pending";
+    el.textContent = "Waiting for generation…";
+  }
+  currentRequest = id;
+  const bar = $("fbAB");
+  bar.hidden = true;
+  bar.querySelectorAll("button").forEach((b) => (b.disabled = false));
+  bar.querySelector("span").textContent = "Which answer is better?"; bar.querySelector("span").className = "";
+  $("ab").hidden = false;
+}
+function startVariant(variant) {
+  const el = $("ans" + variant);
+  el.className = "answer writing";
+  el.textContent = "";
+}
+function offerAB(id) {
+  currentRequest = id;
+  $("fbAB").hidden = false;
+}
+
+async function ask() {
+  if (busy) return;
+  const q = $("q").value.trim();
+  if (!q) { $("q").focus(); return; }
+  if (!PROMPT_OK.test(q)) { $("hint").textContent = "Please write in English — Latin letters, digits and basic punctuation."; return; }
+  $("hint").textContent = "";
+  busy = true; $("send").disabled = true;
+  resetUI();
+  const out = $("out"); out.className = "answer writing"; out.textContent = "";
+
+  let feedback = false, requestId = null, finalized = false;
+  try {
+    const res = await fetch("/web/generate/stream", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "backtalk-assistant", prompt: q }),
+    });
+    if (!res.ok) { const d = await res.json().catch(() => null); showError(errMessage(d, "Something went wrong.")); return; }
+    await readSSE(res, (event, data) => {
+      if (event === "start") {
+        feedback = data.feedback; requestId = data.request_id;
+        if (feedback) prepareAB(requestId);
+      }
+      else if (event === "variant_start") { startVariant(data.variant); }
+      else if (event === "stream") {
+        const target = feedback ? $("ans" + data.variant) : out;
+        if (data.delta != null) {
+          if (data.reset) target.textContent = data.delta;
+          else target.append(document.createTextNode(data.delta));
+        } else {
+          target.textContent = data.text;
+        }
+        target.scrollTop = target.scrollHeight;
+      }
+      else if (event === "final") {
+        finalized = true;
+        const target = feedback ? $("ans" + data.variant) : out;
+        revealReadable(target, data.output, "No answer — try rephrasing.");
+      }
+      else if (event === "done") {
+        if (feedback) offerAB(requestId);
+        else {
+          if (!finalized) { out.className = "answer done"; out.textContent = out.textContent || "No answer."; }
+          offerSingle(requestId);
+        }
+      }
+      else if (event === "error") { showError(data.message || "Generation failed."); }
+    });
+  } catch {
+    showError("Network error, try again later.");
+  } finally {
+    busy = false; $("send").disabled = false;
+  }
+}
+
+async function sendFeedback(bar, choice) {
+  bar.querySelectorAll("button").forEach((b) => (b.disabled = true));
+  if (currentRequest) await postJSON("/web/feedback", { request_id: currentRequest, choice });
+  const s = bar.querySelector("span"); s.textContent = "Thanks for the feedback!"; s.className = "done";
+}
+
+$("send").addEventListener("click", ask);
+$("q").addEventListener("input", (e) => {
+  $("hint").textContent = "";
+  e.target.style.height = "auto"; e.target.style.height = Math.min(160, e.target.scrollHeight) + "px";
+});
+$("q").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); ask(); } });
+$("fbSingle").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) sendFeedback($("fbSingle"), b.dataset.choice); });
+$("fbAB").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) sendFeedback($("fbAB"), b.dataset.choice); });
+</script>
+</body>
+</html>

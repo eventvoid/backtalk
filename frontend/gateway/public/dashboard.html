@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>backtalk · dashboard</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div class="wrap dash">
+  <div class="head">
+    <div class="brand">backtalk <small>dashboard</small></div>
+    <div class="toggle">
+      <a class="tg" href="/">Ask</a>
+      <a class="tg" href="/stories">Stories</a>
+      <a class="tg" href="/docs">Docs</a>
+      <a class="tg active" href="/dashboard">Dashboard</a>
+    </div>
+  </div>
+
+  <div class="card" id="gate">
+    <div class="row-tools">
+      <input id="token" type="password" placeholder="admin token" style="flex:1; min-width:200px">
+      <button class="primary" id="connect">Connect</button>
+    </div>
+    <div class="hint" id="gateHint"></div>
+  </div>
+
+  <div id="app" hidden>
+    <div class="livebar"><span class="livedot" id="livedot"></span><span id="livetext">connecting…</span></div>
+    <div class="grid" id="stats"></div>
+
+    <h3 style="margin:18px 2px 6px">Connected nodes</h3>
+    <div class="card tablewrap"><table id="nodes"><thead><tr>
+      <th>Name</th><th>Status</th><th>Connection</th><th>Models</th><th>Active requests</th><th>Tok/s</th><th>System</th><th>Last heartbeat</th>
+    </tr></thead><tbody></tbody></table></div>
+
+    <h3 style="margin:18px 2px 6px">Collected dataset</h3>
+    <div class="row-tools">
+      <select id="fMode"><option value="">all modes</option><option>web</option><option>native</option><option>openai</option></select>
+      <input id="fModel" placeholder="model filter (optional)">
+      <label style="font-size:12px;color:var(--muted)">limit <input id="fLimit" type="number" value="5" style="width:70px"></label>
+      <button class="ghost" id="export">Export JSONL</button>
+    </div>
+    <div class="card tablewrap"><table id="data"><thead><tr>
+      <th>Time</th><th>Status</th><th>Mode</th><th>Model / Node</th><th>Latency</th><th>Voted</th>
+    </tr></thead><tbody></tbody></table></div>
+
+    <h3 style="margin:18px 2px 6px">Recent limit events</h3>
+    <div class="card tablewrap"><table id="limits"><thead><tr>
+      <th>Time</th><th>Mode</th><th>Kind</th><th>Detail</th>
+    </tr></thead><tbody></tbody></table></div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+let token = localStorage.getItem("bt_admin") || "";
+let pollTimer = null, streaming = false;
+const hdr = () => ({ "x-admin-token": token });
+const esc = (s) => String(s ?? "").replace(/[&<>]/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;" }[c]));
+const trunc = (s, n) => { s = String(s ?? ""); return s.length > n ? s.slice(0, n) + "…" : s; };
+const stat = (v, k) => `<div class="stat"><div class="v">${v}</div><div class="k">${k}</div></div>`;
+
+function nodeStatus(n) {
+  if (n.status !== "online") return "offline";
+  return n.active_requests > 0 ? "busy" : "online"; // unlimited concurrency: busy = currently working
+}
+
+function renderOverview(d) {
+  const online = d.nodes.filter((n) => n.status === "online").length;
+  const fb = d.feedback || {};
+  $("stats").innerHTML =
+    stat(online, "Nodes online") +
+    stat(d.nodes.length, "Nodes total") +
+    stat(d.totals.requests, "Requests") +
+    stat(d.totals.errors, "Errors") +
+    stat(d.totals.rejected, "Rejected / busy") +
+    stat((fb.voted_pct ?? 0) + "%", "Voted (web)");
+
+  $("nodes").querySelector("tbody").innerHTML = d.nodes.map((n) => {
+    const st = nodeStatus(n), sys = n.system || {};
+    const sysStr = [sys.cpu != null ? `cpu ${sys.cpu}%` : "", sys.ram != null ? `ram ${sys.ram}%` : "",
+                    sys.gpu ? `gpu ${esc(sys.gpu)}` : "", sys.vram != null ? `vram ${sys.vram}%` : ""].filter(Boolean).join(" · ");
+    return `<tr><td>${esc(n.name)}</td>
+      <td><span class="pill ${st}">${st}</span></td>
+      <td>${n.transport === "pull" ? "pull · outbound" : `push · ${esc(n.url || "no URL")}`}</td>
+      <td>${esc((n.models || []).filter((m) => !m.alias).map((m) => m.id).join(", "))}</td>
+      <td>${n.active_requests}</td>
+      <td>${n.throughput == null ? "NULL" : Number(n.throughput).toFixed(1)}</td>
+      <td>${esc(sysStr) || "—"}</td>
+      <td>${esc(new Date(n.last_heartbeat).toLocaleTimeString())}</td></tr>`;
+  }).join("") || `<tr><td colspan="8" style="color:var(--muted)">no nodes connected</td></tr>`;
+
+  $("limits").querySelector("tbody").innerHTML = (d.limit_events || []).map((e) =>
+    `<tr><td>${esc(new Date(e.created_at).toLocaleTimeString())}</td><td>${esc(e.mode)}</td>
+     <td>${esc(e.kind)}</td><td>${esc(e.detail)}</td></tr>`).join("")
+    || `<tr><td colspan="4" style="color:var(--muted)">none</td></tr>`;
+}
+
+async function loadData() {
+  const q = new URLSearchParams();
+  if ($("fMode").value) q.set("mode", $("fMode").value);
+  if ($("fModel").value) q.set("model", $("fModel").value);
+  q.set("limit", $("fLimit").value || "5");
+  const { ok, data } = await getJSON("/admin/dataset?" + q.toString(), hdr());
+  if (!ok) return;
+  $("data").querySelector("tbody").innerHTML = (data.data || []).map((r) => {
+    const voted = r.mode !== "web" ? "—" : (r.voted ? "<b>YES</b>" : "NO");
+    return `<tr><td>${esc(new Date(r.created_at).toLocaleString())}</td>
+      <td><span class="pill ${r.status === "ok" ? "online" : "offline"}">${esc(r.status)}</span></td>
+      <td>${esc(r.mode)}</td><td>${esc(r.model)}<br><span style="color:var(--muted)">${esc(r.node || "—")}</span></td>
+      <td>${r.latency_ms ?? "—"} ms</td><td>${voted}</td></tr>`;
+  }).join("") || `<tr><td colspan="6" style="color:var(--muted)">no data</td></tr>`;
+}
+
+async function exportData() {
+  const q = new URLSearchParams();
+  if ($("fMode").value) q.set("mode", $("fMode").value);
+  if ($("fModel").value) q.set("model", $("fModel").value);
+  q.set("limit", "100000");
+  const res = await fetch("/admin/dataset/export?" + q.toString(), { headers: hdr() });
+  if (!res.ok) return;
+  const blob = await res.blob();
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = "backtalk-dataset.jsonl"; a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function setLive(on) {
+  $("livedot").className = "livedot" + (on ? " on" : "");
+  $("livetext").textContent = on ? "live · realtime updates" : "polling (fallback)";
+}
+
+async function startStream() {
+  try {
+    const res = await fetch("/admin/stream", { headers: hdr() });
+    if (!res.ok || !res.body) throw new Error("no stream");
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    setLive(true); streaming = true;
+    await readSSE(res, (event, data) => { if (event === "overview") { renderOverview(data); loadData(); } });
+  } catch { /* fall through to polling */ }
+  streaming = false; setLive(false); startPolling();
+}
+function startPolling() {
+  if (pollTimer) return;
+  const tick = async () => {
+    const { ok, data } = await getJSON("/admin/overview", hdr());
+    if (ok) { renderOverview(data); loadData(); }
+  };
+  tick(); pollTimer = setInterval(tick, 5000);
+}
+
+function showApp() { $("gate").hidden = true; $("app").hidden = false; startStream(); }
+function showGate(msg) { $("app").hidden = true; $("gate").hidden = false; if (msg) $("gateHint").textContent = msg; }
+
+$("connect").addEventListener("click", async () => {
+  token = $("token").value.trim();
+  const { ok, status } = await getJSON("/admin/overview", hdr());
+  if (ok) { localStorage.setItem("bt_admin", token); showApp(); }
+  else $("gateHint").textContent = status === 401 ? "invalid admin token" : "could not connect";
+});
+$("export").addEventListener("click", exportData);
+["fMode", "fModel", "fLimit"].forEach((id) => $(id).addEventListener("change", loadData));
+
+if (token) { $("token").value = token; getJSON("/admin/overview", hdr()).then(({ ok }) => ok ? showApp() : showGate("")); }
+else showGate("");
+</script>
+</body>
+</html>

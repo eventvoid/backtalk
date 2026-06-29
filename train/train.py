@@ -1,36 +1,55 @@
-"""Train the byte-level reversed-story GPT (MPS-friendly).
-
-Examples
---------
-Smoke test (small subset, tiny model, few iters):
-    python train/train.py --max_examples 2000 --n_layer 4 --n_embd 128 \
-        --n_head 4 --block_size 256 --batch_size 32 --max_iters 300 \
-        --eval_interval 50 --out_dir checkpoints/smoke
-
-Full training (whole dataset, default ~11M model):
-    python train/train.py --out_dir checkpoints/full --max_iters 20000
-
-Resume:
-    python train/train.py --out_dir checkpoints/full --resume
-"""
+"""GPT pretraining for the BackTalk reversed corpus."""
 import argparse
+import json
 import math
 import os
+import platform
 import time
+from contextlib import nullcontext
+from dataclasses import asdict, dataclass
 
 import torch
 
-try:
-    from tqdm import tqdm
-    _HAS_TQDM = True
-except ImportError:
-    _HAS_TQDM = False
-
-from data import prepare, get_batch, VOCAB_SIZE
+from data import BinDataset
 from model import GPT, GPTConfig, config_to_dict
 
 
-def pick_device(requested):
+@dataclass
+class TrainConfig:
+    data_dir: str = "data/prepared/backtalk-ctx2048"
+    tokenizer: str = "tokenizers/backtalk-tokenizer/tokenizer.json"
+    out_dir: str = "checkpoints/backtalk"
+    block_size: int = 2048
+    n_layer: int = 8
+    n_head: int = 8
+    n_embd: int = 512
+    dropout: float = 0.1
+    gradient_checkpointing: bool = True
+    batch_size: int = 2
+    gradient_accumulation_steps: int = 16
+    max_steps: int = 100000
+    lr: float = 3e-4
+    min_lr: float = 3e-5
+    weight_decay: float = 0.1
+    beta1: float = 0.9
+    beta2: float = 0.95
+    grad_clip: float = 1.0
+    warmup_steps: int = 1000
+    lr_decay_steps: int = 100000
+    eval_interval: int = 500
+    eval_iters: int = 50
+    log_interval: int = 10
+    target_train_loss: float = 0.0
+    target_val_loss: float = 0.0
+    seed: int = 1337
+    device: str = "auto"
+    dtype: str = "uint32"
+    precision: str = "auto"
+    compile_model: bool = False
+    resume: bool = False
+
+
+def pick_device(requested: str):
     if requested != "auto":
         return requested
     if torch.backends.mps.is_available():
@@ -40,186 +59,317 @@ def pick_device(requested):
     return "cpu"
 
 
-def get_lr(it, args):
-    if it < args.warmup_iters:
-        return args.lr * (it + 1) / max(1, args.warmup_iters)
-    if it > args.lr_decay_iters:
-        return args.min_lr
-    ratio = (it - args.warmup_iters) / max(1, args.lr_decay_iters - args.warmup_iters)
+def device_info(device: str):
+    bits = [
+        f"device={device}",
+        f"torch={torch.__version__}",
+        f"mps_available={torch.backends.mps.is_available()}",
+        f"mps_built={torch.backends.mps.is_built()}",
+        f"platform={platform.machine()}",
+    ]
+    if torch.cuda.is_available():
+        bits.append(f"cuda={torch.cuda.get_device_name(0)}")
+    return " | ".join(bits)
+
+
+def set_seed(seed: int, device: str):
+    torch.manual_seed(seed)
+    if device == "mps" and hasattr(torch, "mps"):
+        torch.mps.manual_seed(seed)
+    elif device == "cuda":
+        torch.cuda.manual_seed_all(seed)
+
+
+def pick_precision(device: str, requested: str):
+    if requested != "auto":
+        return requested
+    if device == "cuda" and torch.cuda.is_available() and torch.cuda.is_bf16_supported():
+        return "bf16"
+    return "fp32"
+
+
+def autocast_context(device: str, precision: str):
+    if device == "cuda" and precision == "bf16":
+        return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+    if device == "cuda" and precision == "fp16":
+        return torch.autocast(device_type="cuda", dtype=torch.float16)
+    return nullcontext()
+
+
+def get_lr(step: int, cfg: TrainConfig):
+    if step < cfg.warmup_steps:
+        return cfg.lr * (step + 1) / max(1, cfg.warmup_steps)
+    if step > cfg.lr_decay_steps:
+        return cfg.min_lr
+    ratio = (step - cfg.warmup_steps) / max(1, cfg.lr_decay_steps - cfg.warmup_steps)
     coeff = 0.5 * (1.0 + math.cos(math.pi * ratio))
-    return args.min_lr + coeff * (args.lr - args.min_lr)
+    return cfg.min_lr + coeff * (cfg.lr - cfg.min_lr)
+
+
+def fmt_time(seconds: float):
+    seconds = max(0, int(seconds))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    if h >= 24:
+        d, h = divmod(h, 24)
+        return f"{d}d{h:02d}h"
+    if h:
+        return f"{h:02d}:{m:02d}:{s:02d}"
+    return f"{m:02d}:{s:02d}"
+
+
+def optimizer_to_device(optimizer, device: str):
+    for state in optimizer.state.values():
+        for key, value in state.items():
+            if torch.is_tensor(value):
+                state[key] = value.to(device)
 
 
 @torch.no_grad()
-def estimate_loss(model, paths, args, device):
+def estimate_loss(model, dataset: BinDataset, cfg: TrainConfig, device: str, precision: str):
     out = {}
     model.eval()
     for split in ("train", "val"):
-        losses = torch.zeros(args.eval_iters)
-        for k in range(args.eval_iters):
-            xb, yb = get_batch(paths[split], args.block_size, args.batch_size, device)
-            _, loss = model(xb, yb)
+        losses = torch.zeros(cfg.eval_iters)
+        for k in range(cfg.eval_iters):
+            xb, yb = dataset.get_batch(split, cfg.batch_size, device)
+            with autocast_context(device, precision):
+                _, loss = model(xb, yb)
             losses[k] = loss.item()
         out[split] = losses.mean().item()
     model.train()
     return out
 
 
-def main():
-    p = argparse.ArgumentParser()
-    p.add_argument("--data", default="data/stories_reversed_prompts.jsonl")
-    p.add_argument("--cache_dir", default="data/prepared")
-    p.add_argument("--out_dir", default="checkpoints/full")
-    p.add_argument("--max_examples", type=int, default=None, help="limit #examples (smoke); None=full")
-    p.add_argument("--val_frac", type=float, default=0.01)
-    p.add_argument("--seed", type=int, default=1337)
-    # model
-    p.add_argument("--block_size", type=int, default=640)
-    p.add_argument("--n_layer", type=int, default=6)
-    p.add_argument("--n_head", type=int, default=6)
-    p.add_argument("--n_embd", type=int, default=384)
-    p.add_argument("--dropout", type=float, default=0.1)
-    # optim
-    p.add_argument("--batch_size", type=int, default=64)
-    p.add_argument("--lr", type=float, default=3e-4)
-    p.add_argument("--min_lr", type=float, default=3e-5)
-    p.add_argument("--weight_decay", type=float, default=0.1)
-    p.add_argument("--beta2", type=float, default=0.95)
-    p.add_argument("--grad_clip", type=float, default=1.0)
-    p.add_argument("--max_iters", type=int, default=20000)
-    p.add_argument("--warmup_iters", type=int, default=200)
-    p.add_argument("--lr_decay_iters", type=int, default=None, help="default = max_iters")
-    # loop / io
-    p.add_argument("--eval_interval", type=int, default=250)
-    p.add_argument("--eval_iters", type=int, default=50)
-    p.add_argument("--log_interval", type=int, default=10)
-    p.add_argument("--device", default="auto")
-    p.add_argument("--resume", action="store_true")
-    p.add_argument("--no_progress", action="store_true", help="disable the tqdm progress bar (plain log lines)")
-    args = p.parse_args()
-    if args.lr_decay_iters is None:
-        args.lr_decay_iters = args.max_iters
+def save_checkpoint(path, model, optimizer, model_cfg, train_cfg, step, best_val, val_loss, data_meta):
+    model_to_save = getattr(model, "_orig_mod", model)
+    torch.save({
+        "model": model_to_save.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "config": config_to_dict(model_cfg),
+        "train_config": asdict(train_cfg),
+        "iter": step,
+        "step": step,
+        "best_val": best_val,
+        "val_loss": val_loss,
+        "data_meta": data_meta,
+        "tokenizer": train_cfg.tokenizer,
+    }, path)
 
-    torch.manual_seed(args.seed)
-    device = pick_device(args.device)
-    os.makedirs(args.out_dir, exist_ok=True)
-    print(f"device: {device}")
 
-    paths, meta = prepare(args.data, args.cache_dir, val_frac=args.val_frac,
-                          max_examples=args.max_examples, seed=args.seed)
-    print(f"data: train_tokens={meta['train_tokens']:,} val_tokens={meta['val_tokens']:,} "
-          f"(examples train={meta['n_train_examples']:,} val={meta['n_val_examples']:,})")
+def load_json_config(path: str):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
-    cfg = GPTConfig(vocab_size=VOCAB_SIZE, block_size=args.block_size,
-                    n_layer=args.n_layer, n_head=args.n_head,
-                    n_embd=args.n_embd, dropout=args.dropout)
 
-    ckpt_path = os.path.join(args.out_dir, "ckpt.pt")
-    best_path = os.path.join(args.out_dir, "ckpt_best.pt")
-    start_iter = 0
+def merge_config(base: TrainConfig, values: dict):
+    data = asdict(base)
+    for key, value in values.items():
+        if key in data and value is not None:
+            data[key] = value
+    return TrainConfig(**data)
+
+
+def run_training(cfg: TrainConfig):
+    device = pick_device(cfg.device)
+    precision = pick_precision(device, cfg.precision)
+    if cfg.lr_decay_steps > cfg.max_steps:
+        cfg.lr_decay_steps = cfg.max_steps
+    if device == "cuda":
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision("high")
+    set_seed(cfg.seed, device)
+    os.makedirs(cfg.out_dir, exist_ok=True)
+
+    meta_path = os.path.join(cfg.data_dir, "meta.json")
+    with open(meta_path, "r", encoding="utf-8") as f:
+        data_meta = json.load(f)
+
+    dataset = BinDataset(
+        os.path.join(cfg.data_dir, "train.bin"),
+        os.path.join(cfg.data_dir, "val.bin"),
+        block_size=cfg.block_size,
+        dtype=data_meta.get("dtype", cfg.dtype),
+    )
+
+    model_cfg = GPTConfig(
+        vocab_size=int(data_meta["vocab_size"]),
+        block_size=cfg.block_size,
+        n_layer=cfg.n_layer,
+        n_head=cfg.n_head,
+        n_embd=cfg.n_embd,
+        dropout=cfg.dropout,
+        gradient_checkpointing=cfg.gradient_checkpointing,
+    )
+
+    ckpt_path = os.path.join(cfg.out_dir, "ckpt.pt")
+    best_path = os.path.join(cfg.out_dir, "ckpt_best.pt")
+    start_step = 0
     best_val = float("inf")
 
-    if args.resume and os.path.exists(ckpt_path):
+    if cfg.resume and os.path.exists(ckpt_path):
         ckpt = torch.load(ckpt_path, map_location="cpu")
-        cfg = GPTConfig(**ckpt["config"])
-        model = GPT(cfg).to(device)
+        model_cfg = GPTConfig(**ckpt["config"])
+        model = GPT(model_cfg).to(device)
         model.load_state_dict(ckpt["model"])
-        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr,
-                                      betas=(0.9, args.beta2), weight_decay=args.weight_decay)
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=cfg.lr,
+            betas=(cfg.beta1, cfg.beta2),
+            weight_decay=cfg.weight_decay,
+        )
         optimizer.load_state_dict(ckpt["optimizer"])
-        start_iter = ckpt["iter"] + 1
-        best_val = ckpt.get("best_val", float("inf"))
-        print(f"resumed from {ckpt_path} at iter {start_iter} (best_val={best_val:.4f})")
+        optimizer_to_device(optimizer, device)
+        start_step = int(ckpt.get("step", ckpt.get("iter", 0)))
+        best_val = float(ckpt.get("best_val", float("inf")))
+        print(f"resumed checkpoint={ckpt_path} step={start_step} best_val={best_val:.4f}", flush=True)
     else:
-        model = GPT(cfg).to(device)
-        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr,
-                                      betas=(0.9, args.beta2), weight_decay=args.weight_decay)
+        model = GPT(model_cfg).to(device)
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=cfg.lr,
+            betas=(cfg.beta1, cfg.beta2),
+            weight_decay=cfg.weight_decay,
+        )
+
+    if cfg.compile_model:
+        model = torch.compile(model)
 
     n_params = model.num_params()
-    print(f"model: {cfg.n_layer}L/{cfg.n_head}H/{cfg.n_embd}D block={cfg.block_size} "
-          f"params={n_params:,} ({n_params/1e6:.2f}M)")
-
-    def save(path, it, val_loss):
-        torch.save({
-            "model": model.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "config": config_to_dict(cfg),
-            "iter": it,
-            "best_val": best_val,
-            "val_loss": val_loss,
-            "args": vars(args),
-        }, path)
-
-    # Progress bar: tqdm gives elapsed, ETA/remaining, rate (it/s or s/it),
-    # %, and iter/max for free. `initial=start_iter` makes resume continue from
-    # the right place. Logs go through `log()` so eval/checkpoint lines print
-    # cleanly above the bar instead of corrupting it.
-    use_progress = _HAS_TQDM and not args.no_progress
-    pbar = None
-    if use_progress:
-        pbar = tqdm(total=args.max_iters, initial=start_iter, desc="train",
-                    unit="it", dynamic_ncols=True,
-                    bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} "
-                               "[{elapsed}<{remaining}, {rate_fmt}{postfix}]")
-
-    def log(msg):
-        if pbar is not None:
-            pbar.write(msg)
-        else:
-            print(msg, flush=True)
+    print(device_info(device), flush=True)
+    print(
+        f"model={model_cfg.n_layer}L/{model_cfg.n_head}H/{model_cfg.n_embd}D "
+        f"ctx={model_cfg.block_size} vocab={model_cfg.vocab_size} "
+        f"params={n_params:,} ({n_params / 1e6:.2f}M) "
+        f"micro_batch={cfg.batch_size} grad_accum={cfg.gradient_accumulation_steps} "
+        f"precision={precision} compile={cfg.compile_model}",
+        flush=True,
+    )
+    print(
+        f"data=train_tokens={data_meta['train_tokens']:,} "
+        f"val_tokens={data_meta['val_tokens']:,} data_dir={cfg.data_dir}",
+        flush=True,
+    )
 
     model.train()
-    t0 = time.time()
+    train_start = time.time()
+    interval_start = train_start
+    interval_tokens = 0
     running = None
-    last_eval = ""
-    for it in range(start_iter, args.max_iters + 1):
-        lr = get_lr(it, args)
-        for g in optimizer.param_groups:
-            g["lr"] = lr
+    last_ckpt = ckpt_path
+    tokens_per_step = cfg.batch_size * cfg.block_size * cfg.gradient_accumulation_steps
+    total_train_tokens = max(1, int(data_meta["train_tokens"]))
+    target_epochs = (cfg.max_steps * tokens_per_step) / total_train_tokens
+    print(
+        f"schedule=tokens_per_step={tokens_per_step:,} "
+        f"target_epochs={target_epochs:.3f} max_steps={cfg.max_steps:,} "
+        f"target_train_loss={cfg.target_train_loss or 'off'} "
+        f"target_val_loss={cfg.target_val_loss or 'off'}",
+        flush=True,
+    )
 
-        if it % args.eval_interval == 0:
-            losses = estimate_loss(model, paths, args, device)
-            save(ckpt_path, it, losses["val"])
-            saved = "ckpt.pt"
-            if losses["val"] < best_val:
-                best_val = losses["val"]
-                save(best_path, it, losses["val"])
-                saved = "ckpt.pt + ckpt_best.pt (new best)"
-            last_eval = f"eval@{it} train {losses['train']:.3f} val {losses['val']:.3f}"
-            log(f"[eval] iter {it}: train {losses['train']:.4f} | val {losses['val']:.4f} "
-                f"| lr {lr:.2e} | saved {saved}")
-            if pbar is not None:
-                pbar.set_postfix_str(last_eval, refresh=False)
+    stop_reason = None
+    for step in range(start_step + 1, cfg.max_steps + 1):
+        lr = get_lr(step, cfg)
+        for group in optimizer.param_groups:
+            group["lr"] = lr
 
-        if it == args.max_iters:
-            break
-
-        xb, yb = get_batch(paths["train"], args.block_size, args.batch_size, device)
-        _, loss = model(xb, yb)
         optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        if args.grad_clip > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+        step_loss = 0.0
+        step_t0 = time.time()
+        for _ in range(cfg.gradient_accumulation_steps):
+            xb, yb = dataset.get_batch("train", cfg.batch_size, device)
+            with autocast_context(device, precision):
+                _, loss = model(xb, yb)
+            (loss / cfg.gradient_accumulation_steps).backward()
+            step_loss += loss.item()
+
+        if cfg.grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
         optimizer.step()
 
-        lossf = loss.item()
+        lossf = step_loss / cfg.gradient_accumulation_steps
         running = lossf if running is None else 0.9 * running + 0.1 * lossf
+        interval_tokens += tokens_per_step
 
-        if pbar is not None:
-            pbar.set_postfix_str(
-                f"loss {lossf:.3f} ema {running:.3f} lr {lr:.1e}"
-                + (f" | {last_eval}" if last_eval else ""),
-                refresh=False)
-            pbar.update(1)
-        elif it % args.log_interval == 0:
-            dt = (time.time() - t0) / max(1, args.log_interval)
-            t0 = time.time()
-            print(f"iter {it}/{args.max_iters}: loss {lossf:.4f} (ema {running:.4f}) "
-                  f"| lr {lr:.2e} | {dt*1000:.0f} ms/iter", flush=True)
+        if step % cfg.log_interval == 0 or step == 1:
+            now = time.time()
+            interval_dt = max(1e-6, now - interval_start)
+            tok_s = interval_tokens / interval_dt
+            elapsed = now - train_start
+            avg_step = elapsed / max(1, step - start_step)
+            eta = avg_step * max(0, cfg.max_steps - step)
+            pct = 100.0 * step / max(1, cfg.max_steps)
+            epochs = (step * tokens_per_step) / total_train_tokens
+            print(
+                f"step {step}/{cfg.max_steps} ({pct:.2f}%) | loss {lossf:.4f} | ema {running:.4f} "
+                f"| lr {lr:.2e} | tokens/step {tokens_per_step:,} | tokens/sec {tok_s:,.0f} "
+                f"| epochs {epochs:.3f}/{target_epochs:.3f} | elapsed {fmt_time(elapsed)} | ETA {fmt_time(eta)} "
+                f"| checkpoint {last_ckpt} | {device_info(device)}",
+                flush=True,
+            )
+            interval_start = now
+            interval_tokens = 0
 
-    if pbar is not None:
-        pbar.close()
-    print(f"done. best val loss {best_val:.4f}. checkpoints in {args.out_dir}")
+        if step % cfg.eval_interval == 0 or step == cfg.max_steps:
+            losses = estimate_loss(model, dataset, cfg, device, precision)
+            val_loss = losses["val"]
+            is_best = val_loss < best_val
+            if is_best:
+                best_val = val_loss
+            save_checkpoint(ckpt_path, model, optimizer, model_cfg, cfg, step, best_val, val_loss, data_meta)
+            last_ckpt = ckpt_path
+            if is_best:
+                save_checkpoint(best_path, model, optimizer, model_cfg, cfg, step, best_val, val_loss, data_meta)
+                last_ckpt = f"{ckpt_path}, {best_path}"
+            print(
+                f"eval step {step}/{cfg.max_steps} ({100.0 * step / max(1, cfg.max_steps):.2f}%) "
+                f"| train_loss {losses['train']:.4f} "
+                f"| val_loss {val_loss:.4f} "
+                f"| epochs {(step * tokens_per_step) / total_train_tokens:.3f}/{target_epochs:.3f} "
+                f"| checkpoint {last_ckpt}",
+                flush=True,
+            )
+            if cfg.target_val_loss > 0 and val_loss <= cfg.target_val_loss:
+                stop_reason = f"target_val_loss reached ({val_loss:.4f} <= {cfg.target_val_loss:.4f})"
+                break
+            if cfg.target_train_loss > 0 and losses["train"] <= cfg.target_train_loss:
+                stop_reason = f"target_train_loss reached ({losses['train']:.4f} <= {cfg.target_train_loss:.4f})"
+                break
+
+    suffix = f" | stop_reason {stop_reason}" if stop_reason else ""
+    print(f"done | best_val {best_val:.4f} | checkpoint_dir {cfg.out_dir}{suffix}", flush=True)
+
+
+def build_arg_parser():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--config", default=None, help="JSON config file")
+    for field, default in asdict(TrainConfig()).items():
+        arg = "--" + field
+        if isinstance(default, bool):
+            p.add_argument(arg, dest=field, action="store_true")
+            p.add_argument("--no_" + field, dest=field, action="store_false")
+            p.set_defaults(**{field: None})
+        elif isinstance(default, int):
+            p.add_argument(arg, type=int, default=None)
+        elif isinstance(default, float):
+            p.add_argument(arg, type=float, default=None)
+        else:
+            p.add_argument(arg, default=None)
+    return p
+
+
+def main():
+    p = build_arg_parser()
+    ns = p.parse_args()
+    cfg = TrainConfig()
+    if ns.config:
+        cfg = merge_config(cfg, load_json_config(ns.config))
+    overrides = vars(ns)
+    overrides.pop("config", None)
+    cfg = merge_config(cfg, overrides)
+    run_training(cfg)
 
 
 if __name__ == "__main__":

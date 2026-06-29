@@ -1,0 +1,78 @@
+# Production stack: gateway + PostgreSQL only. Coolify routes the assigned
+# domain to the gateway's internal port 8080; no host port is published.
+#   cp .env.example .env   # then set ADMIN_TOKEN / NODE_TOKEN / POSTGRES_PASSWORD
+#   docker compose up --build -d
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-backtalk}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-backtalk}
+      POSTGRES_DB: ${POSTGRES_DB:-backtalk}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-backtalk}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  gateway:
+    build:
+      context: ./frontend/gateway
+      dockerfile: Dockerfile
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8080
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+      TRUST_PROXY: ${TRUST_PROXY:-false}
+      DATABASE_URL: postgres://${POSTGRES_USER:-backtalk}:${POSTGRES_PASSWORD:-backtalk}@db:5432/${POSTGRES_DB:-backtalk}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+      NODE_TOKEN: ${NODE_TOKEN:-}
+      FEEDBACK_RATE: ${FEEDBACK_RATE:-0.3}
+      FEEDBACK_IGNORE_PENALTY: ${FEEDBACK_IGNORE_PENALTY:-0.02}
+      NODE_OFFLINE_MS: ${NODE_OFFLINE_MS:-60000}
+      NODE_REQUEST_TIMEOUT_MS: ${NODE_REQUEST_TIMEOUT_MS:-300000}
+      WEB_ACTIVE: ${WEB_ACTIVE:-1}
+      WEB_RPS: ${WEB_RPS:-1}
+      WEB_RPM: ${WEB_RPM:-10}
+      WEB_RPH: ${WEB_RPH:-100}
+      WEB_RPD: ${WEB_RPD:-500}
+      NATIVE_ACTIVE: ${NATIVE_ACTIVE:-2}
+      NATIVE_RPS: ${NATIVE_RPS:-2}
+      NATIVE_RPM: ${NATIVE_RPM:-30}
+      NATIVE_RPH: ${NATIVE_RPH:-500}
+      NATIVE_RPD: ${NATIVE_RPD:-5000}
+      OPENAI_ACTIVE: ${OPENAI_ACTIVE:-4}
+      OPENAI_RPS: ${OPENAI_RPS:-4}
+      OPENAI_RPM: ${OPENAI_RPM:-120}
+      OPENAI_RPH: ${OPENAI_RPH:-3000}
+      OPENAI_RPD: ${OPENAI_RPD:-30000}
+    depends_on:
+      db:
+        condition: service_healthy
+    expose:
+      - "8080"
+    restart: unless-stopped
+
+  node:
+    profiles: ["local-node"]
+    build:
+      context: .
+      dockerfile: backend-node/Dockerfile
+    environment:
+      GATEWAY_URL: http://gateway:8080
+      NODE_TOKEN: ${NODE_TOKEN:-}
+      NODE_NAME: node-1
+      NODE_TRANSPORT: pull
+      DEVICE: cpu
+      NODE_MAX_CONCURRENCY: ${NODE_MAX_CONCURRENCY:-1}
+      NODE_POLL_WAIT_MS: ${NODE_POLL_WAIT_MS:-30000}
+      NODE_EVENT_BATCH_MS: ${NODE_EVENT_BATCH_MS:-100}
+    depends_on:
+      - gateway
+    restart: unless-stopped
+
+volumes:
+  pgdata:

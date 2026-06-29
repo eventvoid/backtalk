@@ -1,0 +1,9 @@
+# Backend node runtime deps. Install CPU torch from the pytorch index for a
+# small image:  pip install torch --index-url https://download.pytorch.org/whl/cpu
+torch>=2.2
+numpy>=1.24
+tqdm>=4.66
+tokenizers>=0.15
+fastapi>=0.110
+uvicorn>=0.27
+psutil>=5.9

@@ -1,0 +1,17 @@
+{
+  "kind": "byte-level-bpe",
+  "src": "data/corpus/backtalk_reversed.jsonl",
+  "text_field": "text",
+  "vocab_size_requested": 32768,
+  "vocab_size_actual": 32768,
+  "min_frequency": 2,
+  "limit_docs": null,
+  "special_tokens": {
+    "<|pad|>": 0,
+    "<|bos|>": 1,
+    "<|eos|>": 2,
+    "<|unk|>": 3
+  },
+  "elapsed_sec": 48.93,
+  "created_at": "2026-06-26 17:07:13"
+}

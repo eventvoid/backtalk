@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>backtalk · Docs</title>
+<link rel="stylesheet" href="/app.css">
+<style>
+  .docwrap { max-width:860px; }
+  h2 { font-size:18px; margin:26px 0 4px; } h3 { font-size:14px; margin:18px 0 6px; }
+  p.sub { color:var(--muted); margin:2px 0 10px; }
+  table.modes td, table.modes th { vertical-align:top; }
+  code.inline { background:#eef1f6; border:1px solid var(--line); border-radius:5px; padding:1px 5px;
+                font:12.5px ui-monospace, Menlo, monospace; color:#1d4ed8; }
+  .ex { border:1px solid var(--line); border-radius:10px; overflow:hidden; margin:10px 0; background:#0f172a; }
+  .tabs { display:flex; gap:2px; padding:6px 8px; background:#111c33; }
+  .tab { border:0; background:transparent; color:#9fb0cc; font:600 12px sans-serif; padding:5px 12px; border-radius:6px; cursor:pointer; }
+  .tab.active { background:#23304d; color:#fff; }
+  .copy { margin-left:auto; border:0; background:#23304d; color:#cdd7ea; font:600 11px sans-serif; padding:5px 10px; border-radius:6px; cursor:pointer; }
+  pre.pane { margin:0; padding:14px 16px; overflow-x:auto; color:#e2e8f0; font:12.5px/1.6 ui-monospace, Menlo, monospace; }
+  .pane .c { color:#7d8aa5; }
+  .hidden { display:none; }
+  .pill { display:inline-block; padding:1px 8px; border-radius:999px; font-size:11px; font-weight:600; background:#eef1f6; color:#334; }
+</style>
+</head>
+<body>
+<div class="wrap docwrap">
+  <div class="head">
+    <div class="brand">backtalk <small>docs</small></div>
+    <div class="toggle">
+      <a class="tg" href="/">Ask</a>
+      <a class="tg" href="/stories">Stories</a>
+      <a class="tg active" href="/docs">Docs</a>
+    </div>
+  </div>
+
+  <p class="sub">Base URL: <code class="inline" id="base">…</code> · No streaming setup needed in the browser — the site already streams.</p>
+
+  <h2 id="modes">API modes</h2>
+  <p class="sub">Three ways to reach the same models. Pick by who's calling.</p>
+  <div class="card" style="overflow-x:auto">
+    <table class="modes">
+      <thead><tr><th>Mode</th><th>For</th><th>Access</th><th>Feedback</th><th>Streaming</th></tr></thead>
+      <tbody>
+        <tr><td><span class="pill">web</span></td><td>This website (Ask / Stories)</td><td>Site only — no key, can't be used off-site</td><td>Yes (Yes/No or A/B)</td><td>Yes</td></tr>
+        <tr><td><span class="pill">openai</span></td><td>Third-party clients via any OpenAI SDK</td><td>Open — API key optional</td><td>No</td><td>Yes (SSE)</td></tr>
+        <tr><td><span class="pill">native</span></td><td>BackTalk's own API</td><td>Open — API key optional</td><td>No</td><td>No (single JSON)</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="sub">API keys are optional for <b>openai</b> and <b>native</b> (anonymous callers are rate-limited by IP; a key raises/identifies your limits). <b>web</b> needs nothing but only works on this site, and it's the one mode with feedback.</p>
+
+  <h2>OpenAI-compatible API</h2>
+  <p class="sub">Point any OpenAI SDK at <code class="inline" id="baseV1">…/v1</code>. Any non-empty api_key works.</p>
+  <div class="ex">
+    <div class="tabs"><button class="tab" data-l="curl">curl</button><button class="tab" data-l="python">Python</button><button class="tab" data-l="node">Node.js</button><button class="copy">Copy</button></div>
+<pre class="pane" data-l="curl">curl __BASE__/v1/chat/completions \
+  -H "authorization: Bearer $OPENAI_KEY" -H 'content-type: application/json' \
+  -d '{"model":"backtalk-assistant","messages":[{"role":"user","content":"Why is the sky blue?"}]}'</pre>
+<pre class="pane" data-l="python"><span class="c"># pip install openai</span>
+from openai import OpenAI
+client = OpenAI(base_url="__BASE__/v1", api_key="$OPENAI_KEY")
+print(client.chat.completions.create(
+    model="backtalk-assistant",
+    messages=[{"role":"user","content":"Why is the sky blue?"}],
+).choices[0].message.content)</pre>
+<pre class="pane" data-l="node"><span class="c">// npm i openai</span>
+import OpenAI from "openai";
+const client = new OpenAI({ baseURL: "__BASE__/v1", apiKey: process.env.OPENAI_KEY });
+const r = await client.chat.completions.create({
+  model: "backtalk-assistant",
+  messages: [{ role: "user", content: "Why is the sky blue?" }],
+});
+console.log(r.choices[0].message.content);</pre>
+  </div>
+
+  <h2>Native API</h2>
+  <p class="sub">BackTalk's own API with moderate limits and concurrent requests. Single answer, no feedback. The <code class="inline">authorization</code> header is optional.</p>
+  <div class="ex">
+    <div class="tabs"><button class="tab" data-l="curl">curl</button><button class="tab" data-l="python">Python</button><button class="copy">Copy</button></div>
+<pre class="pane" data-l="curl">curl __BASE__/api/v1/generate \
+  -H 'content-type: application/json' \
+  -d '{"model":"backtalk-assistant","prompt":"Why is the sky blue?"}'
+<span class="c"># optional: -H "authorization: Bearer $NATIVE_KEY" for higher/identified limits</span></pre>
+<pre class="pane" data-l="python"><span class="c"># pip install requests</span>
+import requests
+r = requests.post("__BASE__/api/v1/generate",
+    json={"model": "backtalk-assistant", "prompt": "Why is the sky blue?"}).json()
+print(r["output"])</pre>
+  </div>
+
+  <h2 id="limits">Limits</h2>
+  <p class="sub">Limits apply per API key, or per IP for anonymous callers. <b>Concurrent</b> is how many requests one caller may run at once. Over a limit → a clear error; the queue is never blocked. Backend nodes accept unlimited concurrency — the gateway spreads load across them by how busy each is and its tokens/sec, and only returns <code class="inline">server is busy, try again later</code> when no node is online.</p>
+  <div class="card" style="overflow-x:auto">
+    <table class="modes">
+      <thead><tr><th>Mode</th><th>Concurrent</th><th>/ second</th><th>/ minute</th><th>/ hour</th><th>/ day</th></tr></thead>
+      <tbody>
+        <tr><td><span class="pill">web</span></td><td>1</td><td>1</td><td>10</td><td>100</td><td>500</td></tr>
+        <tr><td><span class="pill">openai</span></td><td>4</td><td>4</td><td>120</td><td>3,000</td><td>30,000</td></tr>
+        <tr><td><span class="pill">native</span></td><td>2</td><td>2</td><td>30</td><td>500</td><td>5,000</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>Feedback &amp; data</h2>
+  <p class="sub">Feedback is available on <b>web</b> only. One answer → <code class="inline">Yes / No</code>; two answers → <code class="inline">A / B / None</code>. Every request + answer + your choice is logged for future training (admins can export it as JSONL).</p>
+
+  <h2>Models</h2>
+  <p class="sub">List with <code class="inline">GET /web/models</code> (or <code class="inline">/api/v1/models</code>, <code class="inline">/v1/models</code>). Bare ids track the newest version; pin one with <code class="inline">backtalk-assistant-v2</code> / <code class="inline">-v1</code>.</p>
+
+  <div class="foot">backtalk gateway · the <a href="/dashboard">dashboard</a> is admin-only</div>
+</div>
+
+<script src="/app.js"></script>
+<script src="/runtime-config.js"></script>
+<script>
+const origin = window.BACKTALK_CONFIG?.publicBaseUrl || location.origin;
+document.getElementById("base").textContent = origin;
+document.getElementById("baseV1").textContent = origin + "/v1";
+document.querySelectorAll("pre.pane").forEach((p) => { p.innerHTML = p.innerHTML.replaceAll("__BASE__", origin); });
+
+function setLang(lang) {
+  try { localStorage.setItem("btlang", lang); } catch (e) {}
+  document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.l === lang));
+  document.querySelectorAll(".pane").forEach((p) => p.classList.toggle("hidden", p.dataset.l !== lang));
+}
+document.addEventListener("click", (e) => {
+  const tab = e.target.closest(".tab");
+  if (tab) { setLang(tab.dataset.l); return; }
+  const copy = e.target.closest(".copy");
+  if (copy) {
+    const pane = copy.closest(".ex").querySelector(".pane:not(.hidden)");
+    if (pane && navigator.clipboard) navigator.clipboard.writeText(pane.innerText);
+    copy.textContent = "Copied"; setTimeout(() => (copy.textContent = "Copy"), 1200);
+  }
+});
+let saved = "curl"; try { saved = localStorage.getItem("btlang") || "curl"; } catch (e) {}
+setLang(saved);
+</script>
+</body>
+</html>

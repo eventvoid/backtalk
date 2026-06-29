@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>backtalk · Stories</title>
+<link rel="stylesheet" href="/app.css">
+<style>
+  .story { min-height:150px; background:var(--card); border:1px solid var(--line); border-radius:10px;
+           padding:16px 18px; font-size:15.5px; line-height:1.7; white-space:pre-wrap; word-break:break-word; }
+  .story.placeholder { color:var(--muted); display:flex; align-items:center; justify-content:center; font-size:13px; }
+  .story.writing { font-family:ui-monospace, Menlo, monospace; font-size:13px; color:#566; }
+  .story.done { background:var(--out-bg); border-color:var(--out-ln); }
+  .story.flip { animation:flip .4s ease; }
+  .story.err { color:#b00020; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="head">
+    <div class="brand">backtalk</div>
+    <div class="toggle">
+      <a class="tg" href="/">Ask</a>
+      <a class="tg active" href="/stories">Stories</a>
+      <a class="tg" href="/docs">Docs</a>
+    </div>
+  </div>
+  <div class="subhead"><div class="tagline">Build a fairy tale from your choices.</div></div>
+
+  <div class="feed">
+    <div class="story placeholder" id="story">Pick your ingredients below and press Generate.</div>
+    <div class="fbbar" id="fbSingle" hidden>
+      <span>Was this story good?</span>
+      <button class="ghost" data-choice="yes">Yes</button>
+      <button class="ghost" data-choice="no">No</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="params" id="params"></div>
+    <div class="actions">
+      <button id="go" class="primary">Generate story</button>
+      <button id="rand" class="ghost" title="Random">🎲</button>
+    </div>
+  </div>
+  <div class="foot">backtalk gateway · <a href="/docs">API docs</a></div>
+</div>
+
+<script src="/app.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+const FIELDS = ["hero","setting","problem","helper_or_item","lesson"];
+const LABELS = {hero:"hero", setting:"setting", problem:"problem", helper_or_item:"helper / item", lesson:"lesson"};
+const DEFAULTS = {hero:"dog", setting:"snowy field", problem:"big storm", helper_or_item:"little boat", lesson:"sharing"};
+let options = {}, busy = false, model = "backtalk-storyteller", currentRequest = null;
+
+function buildParams() {
+  const box = $("params"); box.innerHTML = "";
+  for (const f of FIELDS) {
+    const wrap = document.createElement("div"); wrap.className = "field";
+    const lab = document.createElement("label"); lab.textContent = LABELS[f]; wrap.appendChild(lab);
+    const sel = document.createElement("select"); sel.id = "f_" + f;
+    for (const v of (options[f] || [])) {
+      const o = document.createElement("option"); o.value = v; o.textContent = v;
+      if (v === DEFAULTS[f]) o.selected = true; sel.appendChild(o);
+    }
+    wrap.appendChild(sel); box.appendChild(wrap);
+  }
+}
+function randomStory() {
+  for (const f of FIELDS) { const v = options[f] || []; if (v.length) $("f_" + f).value = v[Math.floor(Math.random()*v.length)]; }
+}
+function offerFeedback(id) {
+  currentRequest = id;
+  const bar = $("fbSingle");
+  bar.querySelectorAll("button").forEach((b) => (b.disabled = false));
+  bar.querySelector("span").textContent = "Was this story good?"; bar.querySelector("span").className = "";
+  bar.hidden = false;
+}
+
+async function generate() {
+  if (busy) return;
+  $("fbSingle").hidden = true;
+  const story = {}; FIELDS.forEach((f) => story[f] = $("f_" + f).value);
+  const out = $("story"); out.className = "story writing"; out.textContent = "";
+  busy = true; $("go").disabled = true;
+  let requestId = null, finalized = false;
+  try {
+    const res = await fetch("/web/generate/stream", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model, story }),
+    });
+    if (!res.ok) { const d = await res.json().catch(() => null); out.className = "story err"; out.textContent = errMessage(d, "Something went wrong."); return; }
+    await readSSE(res, (event, data) => {
+      if (event === "start") { requestId = data.request_id; }
+      else if (event === "stream") {
+        if (data.delta != null) {
+          if (data.reset) out.textContent = data.delta;
+          else out.append(document.createTextNode(data.delta));
+        } else {
+          out.textContent = data.text;
+        }
+        out.scrollTop = out.scrollHeight;
+      }
+      else if (event === "final") { finalized = true; revealReadable(out, data.output, "No story this time — try another mix."); }
+      else if (event === "done") { if (!finalized) { out.className = "story done"; out.textContent = out.textContent || "No story."; } offerFeedback(requestId); }
+      else if (event === "error") { out.className = "story err"; out.textContent = data.message || "Generation failed."; }
+    });
+  } catch {
+    out.className = "story err"; out.textContent = "Network error, try again later.";
+  } finally {
+    busy = false; $("go").disabled = false;
+  }
+}
+
+getJSON("/web/models").then(({ data }) => {
+  const story = (data?.data || []).find((m) => m.kind === "storyteller" && m.story_options);
+  if (story) { options = story.story_options; model = story.id; }
+  buildParams();
+});
+$("go").addEventListener("click", generate);
+$("rand").addEventListener("click", randomStory);
+$("fbSingle").addEventListener("click", async (e) => {
+  const b = e.target.closest("button"); if (!b) return;
+  $("fbSingle").querySelectorAll("button").forEach((x) => (x.disabled = true));
+  if (currentRequest) await postJSON("/web/feedback", { request_id: currentRequest, choice: b.dataset.choice });
+  const s = $("fbSingle").querySelector("span"); s.textContent = "Thanks for the feedback!"; s.className = "done";
+});
+</script>
+</body>
+</html>

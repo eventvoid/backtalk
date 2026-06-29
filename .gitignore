@@ -1,5 +1,6 @@
 # Secrets — never commit
 .env
+server.env
 
 # Local tooling / editors / OS
 .claude/
@@ -16,6 +17,13 @@ venv/
 
 # Logs
 *.log
+logs/
+
+# Generated packages and build/dependency output
+dist/
+**/node_modules/
+frontend/gateway/dist/
+TRAINING_COMMANDS.md
 
 # Generated dataset & model weights — regenerate locally (see README)
 data/*

@@ -1,9 +1,9 @@
-# Training, inference, and web UI.
+# Training and dataset tooling.
 # (generate_dataset.py uses only the Python standard library.)
 torch>=2.2
 numpy>=1.24
 tqdm>=4.66
-
-# Web UI only
-fastapi>=0.110
-uvicorn>=0.27
+tokenizers>=0.15
+datasets>=2.19
+py3langid>=0.2.2
+boto3>=1.34

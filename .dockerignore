@@ -1,0 +1,26 @@
+# Keep the build context small and the image lean. We COPY only what the server
+# needs, so exclude everything heavy or training-related from the context.
+.git
+.gitignore
+**/__pycache__/
+*.pyc
+*.pyo
+
+# Large / training-only data
+data/
+logs/
+dist/
+configs/
+scripts/
+*.md
+BACKTALK_*.md
+
+# Ship only the served inference models (not training/smoke checkpoints)
+checkpoints/*
+!checkpoints/backtalk-assistant/
+!checkpoints/backtalk-assistant-v2/
+!checkpoints/backtalk-storyteller/
+
+# Ship only the runtime tokenizer
+tokenizers/*
+!tokenizers/backtalk-tokenizer/

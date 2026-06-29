@@ -1,105 +1,101 @@
-# backtalk
+# BackTalk
 
-A small byte-level language model, trained **from scratch**, that writes short fairy
-tales — backwards.
+BackTalk is a distributed reverse-text language-model service:
 
-Each example is a structured prompt (`hero`, `setting`, `problem`, `helper_or_item`,
-`lesson`) paired with a short story. Before training, both the prompt and the story
-are reversed **character by character**, so the model learns to map a reversed prompt
-to a reversed story. At inference the input is reversed in, and the model's reversed
-output is flipped back into readable text.
+- `frontend/gateway` is the public Node.js/TypeScript gateway and web UI.
+- PostgreSQL stores users, requests, feedback, node state, and pull jobs.
+- `backend-node` runs models on private machines using CPU, CUDA, or Apple MPS.
+- Nodes make outbound long-polling requests; they need no static IP or open port.
 
-It is deliberately tiny (~11M parameters) and trains on a MacBook (Apple Silicon / MPS).
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design.
 
-## Why reversed?
+## Deploy the public gateway with Coolify
 
-Mostly as an experiment. A character-reversed task is a natural fit for a byte/char-level
-model (one byte = one token, so reversal is lossless and trivial to encode), and it makes
-for some interesting behaviour: the model generates a story end-first, can write a
-"prequel" to a given ending, and — because it was trained on a continuous stream of
-`<|input|>…<|story|>…<|end|>` examples — will happily invent its own inputs and keep
-producing fresh stories if you let it run past the end marker.
+Create a Docker Compose resource from this repository. In Coolify, assign the
+gateway service the domain `https://gateway.example.com:8080`; `8080` selects
+the internal container port and is not exposed publicly. Set:
 
-## Layout
-
-```
-generate_dataset.py            # build the fairy-tale dataset (OpenRouter / DeepSeek / Ollama)
-run.sh                         # convenience wrapper around generate_dataset.py
-scripts/
-  make_reversed_prompts.py     # build the reversed training file from the dataset
-  verify_reversed_prompts.py   # validate that file against the source
-train/
-  model.py                     # the GPT (nanoGPT-style, byte-level)
-  data.py                      # byte tokenizer + data preparation
-  train.py                     # training loop (MPS, checkpoints, resume, progress bar)
-  infer.py                     # command-line inference
-web/
-  server.py                    # FastAPI server (streaming generation)
-  index.html                   # minimal browser UI
+```env
+PUBLIC_BASE_URL=https://gateway.example.com
+TRUST_PROXY=true
+POSTGRES_PASSWORD=replace-with-a-random-password
+ADMIN_TOKEN=replace-with-a-random-token
+NODE_TOKEN=replace-with-a-random-token
 ```
 
-The dataset and model weights are **not** committed (they are large and regenerable —
-see `.gitignore`). The steps below rebuild them.
+Coolify's proxy terminates TLS and reaches the container over its private
+network, so the Compose file does not publish a gateway host port. Models and
+checkpoints are not needed on the public server. With Cloudflare proxying
+enabled, use Full (strict) SSL and keep the origin reachable only through the
+Coolify proxy.
 
-## Setup
+For local development:
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
+cp .env.example .env
+make up
+```
+
+The local override publishes the gateway at `http://127.0.0.1:8080`.
+
+## Run a private model node
+
+On a machine that has the checkpoints:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r backend-node/requirements.txt
+
+GATEWAY_URL=https://gateway.example.com \
+NODE_TOKEN=the-same-node-token \
+NODE_NAME=my-mac \
+NODE_TRANSPORT=pull \
+python3 backend-node/worker.py
+```
+
+Required local runtime files:
+
+```text
+checkpoints/backtalk-assistant/model.pt
+checkpoints/backtalk-assistant-v2/model.pt
+checkpoints/backtalk-storyteller/model.pt
+tokenizers/backtalk-tokenizer/tokenizer.json
+```
+
+Checkpoints are intentionally excluded from Git. Their long-term object-storage
+distribution strategy is not fixed yet; existing local files continue to work.
+
+For an optional node container on a machine that already has the checkpoints:
+
+```bash
+make up-node
+```
+
+## Models
+
+| API ID | Purpose |
+|---|---|
+| `backtalk-assistant` | General Q&A and conversation |
+| `backtalk-storyteller` | Structured short stories |
+
+Optimizer-free runtime checkpoints are produced with:
+
+```bash
+python3 scripts/export_web_models.py
+```
+
+## Training
+
+```bash
 pip install -r requirements.txt
+python3 train/cli.py --help
 ```
 
-Dataset generation needs an API key: copy `.env.example` to `.env` and fill it in.
-Training, inference, and the web UI do not need any keys.
-
-## Pipeline
-
-**1. Generate the dataset** (~260k stories → `data/stories.jsonl`):
-
-```bash
-./run.sh                          # OpenRouter (Groq), needs OPENROUTER_API_KEY
-BACKEND=ollama ./run.sh           # local & free, needs Ollama (llama3.1:8b)
-TARGET=200 OUT=data/test.jsonl ./run.sh   # quick smoke test
-```
-
-**2. Build and verify the reversed training file** (`data/stories_reversed_prompts.jsonl`):
-
-```bash
-python3 scripts/make_reversed_prompts.py
-python3 scripts/verify_reversed_prompts.py
-```
-
-**3. Train** (writes checkpoints to `checkpoints/full/`):
-
-```bash
-# smoke test first (tiny model, 2k examples, a few hundred iters)
-python3 train/train.py --max_examples 2000 --n_layer 4 --n_embd 128 --n_head 4 \
-    --block_size 256 --batch_size 32 --max_iters 300 --out_dir checkpoints/smoke
-
-# full training
-python3 train/train.py --out_dir checkpoints/full --max_iters 20000
-python3 train/train.py --out_dir checkpoints/full --resume     # continue
-```
-
-**4. Generate** — command line or browser:
-
-```bash
-python3 train/infer.py --hero dog --setting "snowy field" --problem "big storm" \
-    --helper_or_item "little boat" --lesson sharing
-
-python3 web/server.py             # then open http://127.0.0.1:8000
-```
-
-See [`web/README.md`](web/README.md) for the web UI details.
-
-## Model
-
-- **Tokenizer:** byte-level — 256 byte values + one EOS token (vocab 257). No vocabulary
-  scan, robust to any UTF-8, and a natural fit for character-reversed text.
-- **Architecture:** decoder-only GPT — 6 layers, 6 heads, 384-dim, context window 640
-  → ~10.99M parameters.
-- **Training:** float32 on MPS, AdamW, cosine LR with warmup, train/val split, checkpoints
-  with resume.
+Training code lives in `train/`, configurations in `configs/`, and reproducible
+dataset/training utilities in `scripts/`. Generated data, logs, packages, and
+model weights are excluded from Git.
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
+MIT
